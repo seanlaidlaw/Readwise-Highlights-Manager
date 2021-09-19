@@ -2,15 +2,17 @@
 # -*- coding: utf-8 -*-
 
 import os
+import pandas as pd
+import csv
 import time
 import requests
-import json
 import sqlite3
 import math
 from datetime import datetime
 
 if not "API_TOKEN_READWISE" in os.environ:
-    raise SystemExit("Error: Environment variable API_TOKEN_READWISE is not set")
+    raise SystemExit(
+        "Error: Environment variable API_TOKEN_READWISE is not set")
 
 
 def createDatabase(highlights_database):
@@ -74,6 +76,51 @@ def getTotalPagesOutput(data):
         # round up the count / 1000 to get the number of pages needed to request if we have 1000 results per page
         total_pages = int(math.ceil(float(data["count"]) / float(1000)))
     return total_pages
+
+
+def getUpdatedHighlights(updated_filter):
+    pages_of_results = []
+    page_number = 1
+
+    # get total number of highlights by writing a small request to see the total count. We are interested in the updated but not new highlights, so we set filter of updated since and highlighted before
+    response = requests.get(
+        url="https://readwise.io/api/v2/highlights/",
+        headers={
+            "Authorization": os.environ["API_TOKEN_READWISE"],
+        },
+        params={
+            "page_size": 1,
+            "page": 1,
+            "updated__gt": updated_filter,
+            "highlighted_at__lt": updated_filter,
+        },
+    )
+
+    data = response.json()
+    total_pages = getTotalPagesOutput(data)
+
+    # for each of the pages we need to request, make a request and append its results to a list
+    while page_number <= total_pages:
+        querystring = {
+            "page_size": 1000,
+            "page": page_number,
+            "updated__gt": updated_filter,
+            "highlighted_at__lt": updated_filter,
+        }
+
+        response = requests.get(
+            url="https://readwise.io/api/v2/highlights/",
+            headers={
+                "Authorization": os.environ["API_TOKEN_READWISE"],
+            },
+            params=querystring,
+        )
+        data = response.json()
+        pages_of_results.append(data["results"])
+
+        page_number = page_number + 1
+
+    return pages_of_results
 
 
 def getItemsInCategory(category, updated_filter):
@@ -193,38 +240,121 @@ def getItemIdsWithTag(database_cursor, tag_id):
 
 
 def getLastRunDate(database_cursor):
-    database_cursor.execute("SELECT last_updated FROM log ORDER by id DESC LIMIT 1")
+    database_cursor.execute(
+        "SELECT last_updated FROM log ORDER by id DESC LIMIT 1;")
     data = database_cursor.fetchall()
 
     # if not run before then set last_date to start of UNIX time to get all readwise highlights
-    if len(data) < 1:
-        last_date = "1970-01-01T00:00:00Z"
-    else:
+    last_date = "1970-01-01T00:00:00Z"
+
+    if len(data) > 0:
         for last_dates in data:
-            last_date = last_dates[0]  # we only request one column but it returns list
+            # we only request one column but it returns list
+            last_date = last_dates[0]
 
     return last_date
 
 
-#### FUNCTION BLOCK END ####
+def exportSQLiteCSV(database_cursor, filename):
+    database_cursor.execute(
+        "SELECT * FROM Highlights LEFT JOIN ItemIds ON Highlights.book_id=ItemIds.id"
+    )
+    data = database_cursor.fetchall()
+
+    with open(filename, "w") as file:
+        csv_writer = csv.writer(file)
+        csv_writer.writerows(data)
 
 
-skip_readwise_update = False
-highlights_database = "Highlights/Readwise_highlights_archive.sqlite3"
-current_datetime = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+def UpdateMissingHighlightsTags(database_cursor):
+    tsv_data = pd.read_csv("Data/addon_tags.tsv", sep="\t")
+
+    # get each highlight and its notes containing tags
+    database_cursor.execute(
+        "SELECT id AS highlight_id,note FROM Highlights WHERE note LIKE '.%';"
+    )
+    data = database_cursor.fetchall()
+
+    for highlight in data:
+        highlight_id = highlight[0]
+        highlight_tags = highlight[1]
+
+        # make a set of just the tags of the highlight
+        only_tag_set = set()
+        for tag_set in highlight_tags.split(" "):
+            if tag_set.startswith("."):
+                only_tag_set.add(tag_set)
+
+        # see if tag is in TSV to be associated with another tag
+        for tag in only_tag_set:
+            if tag in tsv_data["primary_tag"].tolist():
+                subset = tsv_data.loc[tsv_data["primary_tag"] == tag]
+                associated_tag = subset["associated_tag"].tolist()[0]
+
+                if not associated_tag in only_tag_set:
+                    addTagToHighlight(highlight_id, associated_tag)
 
 
-# create database and tables if not exist
-if not os.path.isfile(highlights_database):
-    createDatabase(highlights_database)
+def addTagToHighlight(highlight_id, tag):
+    response = requests.get(
+        url="https://readwise.io/api/v2/highlights/{}".format(highlight_id),
+        headers={
+            "Authorization": os.environ["API_TOKEN_READWISE"],
+        },
+    )
+    data = response.json()
+    current_note = data["note"]
 
-connection = sqlite3.connect(highlights_database)
-cursor = connection.cursor()
+    new_note = current_note + " " + tag
+    response = requests.patch(
+        url="https://readwise.io/api/v2/highlights/{}".format(highlight_id),
+        headers={
+            "Authorization": os.environ["API_TOKEN_READWISE"],
+        },
+        data={
+            "note": new_note,
+        },
+    )
+    data = response.json()
 
-last_updated = getLastRunDate(cursor)
 
 
-if not skip_readwise_update:
+
+# get list of highlights that are not new but which have been updated since last run
+list_only_updated = getUpdatedHighlights(last_updated)
+
+
+def updateLocalDatabase(cursor, connection, last_updated):
+
+    # get list of highlights that are not new but which have been updated since last run
+    list_only_updated = getUpdatedHighlights(last_updated)
+
+    # for each updated highlight replace its entry in the database
+    for page_items in list_only_updated:
+        for item in page_items:
+            cursor.execute(
+                """
+                    INSERT OR REPLACE INTO Highlights (id, text, note, location, location_type, updated, highlighted_at, url, color, book_id, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                (
+                    item["id"],
+                    item["text"],
+                    item["note"],
+                    item["location"],
+                    item["location_type"],
+                    item["updated"],
+                    item["highlighted_at"],
+                    item["url"],
+                    item["color"],
+                    item["book_id"],
+                    getTags(item["tags"]),
+                ),
+            )
+
+            connection.commit()
+
+    # now get all new highlights
     # readwise currently (as of Aug 2021) the following categories:
     # "books", "articles", "tweets", "supplementals", "podcasts"
     list_books = getItemsInCategory("books", last_updated)
@@ -247,16 +377,8 @@ if not skip_readwise_update:
             for item in page_items:
                 cursor.execute(
                     """
-                    INSERT INTO ItemIds (id, category, title, author, cover_url, readwise_page, source_url, tags)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        category=excluded.category,
-                        title=excluded.title,
-                        author=excluded.author,
-                        cover_url=excluded.cover_url,
-                        readwise_page=excluded.readwise_page,
-                        source_url=excluded.source_url,
-                        tags=excluded.tags;
+                    INSERT OR REPLACE INTO ItemIds (id, category, title, author, cover_url, readwise_page, source_url, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         int(item["id"]),
@@ -272,7 +394,12 @@ if not skip_readwise_update:
 
                 connection.commit()
                 # add each item id to a list so that we can only request highlights about updated items not about the rest
-                item_ids = item_ids.append(item["id"])
+                item_ids.append(int(item["id"]))
+
+    # if after going through each of the categories there are no new highlights then exit function early
+    if len(item_ids) < 1:
+        print("No new highlights to sync")
+        return
 
     for item_id in item_ids:
         # get all highlights from article/podcast/etc. of id 'item_id'
@@ -283,19 +410,8 @@ if not skip_readwise_update:
             for highlight in page:
                 cursor.execute(
                     """
-                    INSERT INTO Highlights (id, text, note, location, location_type, updated, highlighted_at, url, color, book_id, tags)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        text=excluded.text,
-                        note=excluded.note,
-                        location=excluded.location,
-                        location_type=excluded.location_type,
-                        updated=excluded.updated,
-                        highlighted_at=excluded.highlighted_at,
-                        url=excluded.url,
-                        color=excluded.color,
-                        book_id=excluded.book_id,
-                        tags=excluded.tags;
+                    INSERT OR REPLACE INTO Highlights (id, text, note, location, location_type, updated, highlighted_at, url, color, book_id, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         highlight["id"],
@@ -318,4 +434,27 @@ if not skip_readwise_update:
     # its run it can get only the new highlights and not re-request everything
     cursor.execute("Insert into Log values (NULL, ?)", ([current_datetime]))
     connection.commit()
+
+    # after writing to database export to CSV
+    exportSQLiteCSV(cursor, "Highlights/readwise_higlights_export.csv")
+
+#### FUNCTION BLOCK END ####
+
+
+highlights_database = "Highlights/Readwise_highlights_archive.sqlite3"
+current_datetime = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# create database and tables if not exist
+if not os.path.isfile(highlights_database):
+    createDatabase(highlights_database)
+
+connection = sqlite3.connect(highlights_database)
+cursor = connection.cursor()
+
+last_updated = getLastRunDate(cursor)
+updateLocalDatabase(cursor, connection, last_updated)
+
+
+UpdateMissingHighlightsTags(cursor)
 
