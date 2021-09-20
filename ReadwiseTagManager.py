@@ -16,6 +16,12 @@ if not "API_TOKEN_READWISE" in os.environ:
 
 
 def createDatabase(highlights_database):
+    """
+    Creates the highlights database.
+
+    Args:
+        highlights_database: write your description
+    """
     connection = sqlite3.connect(highlights_database)
     cursor = connection.cursor()
     sql_create_itemids_table = """CREATE TABLE ItemIds (
@@ -53,6 +59,12 @@ def createDatabase(highlights_database):
 
 
 def getTags(tag_list):
+    """
+    Convert a list of tags into a space separated string of tag ids
+
+    Args:
+        tag_list: write your description
+    """
     # get and format tags for a given highlight or article
     # sqlite doesn't support arrays so we are going to input it as
     # space separated string of tag ids
@@ -67,6 +79,12 @@ def getTags(tag_list):
 
 
 def getTotalPagesOutput(data):
+    """
+    Returns the total number of pages needed to display the Highlight results.
+
+    Args:
+        data: write your description
+    """
     # this parses the data json response for the count value and divides it by the max
     # page_size we request (1000) to work out how many pages are needed. as the API requires we
     # give the requested page of Highlight results as a integer we round it up using the
@@ -79,6 +97,12 @@ def getTotalPagesOutput(data):
 
 
 def getUpdatedHighlights(updated_filter):
+    """
+    Returns a list of highlighted highlights.
+
+    Args:
+        updated_filter: write your description
+    """
     pages_of_results = []
     page_number = 1
 
@@ -124,6 +148,13 @@ def getUpdatedHighlights(updated_filter):
 
 
 def getItemsInCategory(category, updated_filter):
+    """
+    Get all items in a category.
+
+    Args:
+        category: write your description
+        updated_filter: write your description
+    """
     pages_of_results = []
     page_number = 1
 
@@ -169,6 +200,13 @@ def getItemsInCategory(category, updated_filter):
 
 
 def getHighlightsInItem(item_id, updated_filter):
+    """
+    Returns a list of highlights in the given item.
+
+    Args:
+        item_id: write your description
+        updated_filter: write your description
+    """
     pages_of_results = []
     page_number = 1
 
@@ -216,6 +254,12 @@ def getHighlightsInItem(item_id, updated_filter):
 
 
 def getDatabaseItemIds(database_cursor):
+    """
+    Returns a list of database item ids.
+
+    Args:
+        database_cursor: write your description
+    """
     database_cursor.execute("SELECT DISTINCT id FROM ItemIds")
     data = database_cursor.fetchall()
     item_id_list = []
@@ -227,6 +271,13 @@ def getDatabaseItemIds(database_cursor):
 
 
 def getItemIdsWithTag(database_cursor, tag_id):
+    """
+    Returns list of item ids with the given tag.
+
+    Args:
+        database_cursor: write your description
+        tag_id: write your description
+    """
     database_cursor.execute(
         "SELECT * FROM ItemIds WHERE tags LIKE '%{}%';".format(tag_id)
     )
@@ -240,6 +291,12 @@ def getItemIdsWithTag(database_cursor, tag_id):
 
 
 def getLastRunDate(database_cursor):
+    """
+    Get the last run date.
+
+    Args:
+        database_cursor: write your description
+    """
     database_cursor.execute(
         "SELECT last_updated FROM log ORDER by id DESC LIMIT 1;")
     data = database_cursor.fetchall()
@@ -256,6 +313,13 @@ def getLastRunDate(database_cursor):
 
 
 def exportSQLiteCSV(database_cursor, filename):
+    """
+    Exports the data from the SQLite database cursor to CSV.
+
+    Args:
+        database_cursor: write your description
+        filename: write your description
+    """
     database_cursor.execute(
         "SELECT * FROM Highlights LEFT JOIN ItemIds ON Highlights.book_id=ItemIds.id"
     )
@@ -267,6 +331,12 @@ def exportSQLiteCSV(database_cursor, filename):
 
 
 def UpdateMissingHighlightsTags(database_cursor):
+    """
+    Updates tags of all highlights that are missing from TSV.
+
+    Args:
+        database_cursor: write your description
+    """
     tsv_data = pd.read_csv("Data/addon_tags.tsv", sep="\t")
 
     # get each highlight and its notes containing tags
@@ -296,6 +366,13 @@ def UpdateMissingHighlightsTags(database_cursor):
 
 
 def addTagToHighlight(highlight_id, tag):
+    """
+    Add a tag to a highlight.
+
+    Args:
+        highlight_id: write your description
+        tag: write your description
+    """
     response = requests.get(
         url="https://readwise.io/api/v2/highlights/{}".format(highlight_id),
         headers={
@@ -325,6 +402,14 @@ list_only_updated = getUpdatedHighlights(last_updated)
 
 
 def updateLocalDatabase(cursor, connection, last_updated):
+    """
+    Updates the local database with the latest highlights from the database.
+
+    Args:
+        cursor: write your description
+        connection: write your description
+        last_updated: write your description
+    """
 
     # get list of highlights that are not new but which have been updated since last run
     list_only_updated = getUpdatedHighlights(last_updated)
